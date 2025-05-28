@@ -1,0 +1,295 @@
+{\rtf1\ansi\ansicpg1252\deff0\nouicompat\deflang1033{\fonttbl{\f0\fnil\fcharset0 Calibri;}}
+{\*\generator Riched20 10.0.19041}\viewkind4\uc1 
+\pard\sa200\sl276\slmult1\f0\fs22\lang9 One-to-Many (Broadcast) replication in Oracle GoldenGate is a topology where changes from a single source database are replicated to multiple target databases. This is a very common and efficient configuration for scenarios like:\par
+\par
+Reporting Databases: Distributing transactional data from a central OLTP system to multiple reporting databases (e.g., for different departments or geographical regions).\par
+Disaster Recovery/High Availability: Maintaining multiple synchronized standby databases in different locations for failover purposes.\par
+Data Distribution: Broadcasting master data or reference data updates from a central hub to various distributed applications or caches.\par
+Testing/Development Environments: Keeping development or testing environments refreshed with near real-time data from production.\par
+Key Considerations for One-to-Many Broadcast:\par
+Source Overhead: The source database captures changes only once, minimizing its impact. The bulk of the work (sending data) is handled by GoldenGate processes on the source.\par
+Network Bandwidth: Replication to multiple targets can consume significant network bandwidth, especially if targets are geographically dispersed.\par
+Target Differences: Target databases might have different schemas, hardware, or performance characteristics. Replicat processes need to be configured individually for each target.\par
+Initial Load: An initial load is required to synchronize the data from the source to each target before CDC begins.\par
+Example: Broadcasting Customer Data from Central to Regional DBs\par
+Let's assume we have a central PROD_DB (on HostP) and we want to replicate its CUSTOMERS table to two regional databases, REGION_DB1 (on HostR1) and REGION_DB2 (on HostR2).\par
+\par
+Source Database: PROD_DB\par
+Target Databases: REGION_DB1, REGION_DB2\par
+\par
+1. Database & Schema Preparation (All Databases)\par
+1.1. SQL (Connect as SYSDBA on PROD_DB, REGION_DB1, and REGION_DB2)\par
+\par
+SQL\par
+\par
+-- On ALL databases (PROD_DB, REGION_DB1, REGION_DB2):\par
+\par
+-- Ensure ARCHIVELOG mode and Force Logging\par
+SHUTDOWN IMMEDIATE;\par
+STARTUP MOUNT;\par
+ALTER DATABASE ARCHIVELOG;\par
+ALTER DATABASE OPEN;\par
+ALTER DATABASE FORCE LOGGING;\par
+\par
+-- Enable supplemental logging at the database level\par
+ALTER DATABASE ADD SUPPLEMENTAL LOG DATA;\par
+ALTER DATABASE ADD SUPPLEMENTAL LOG DATA (PRIMARY KEY, UNIQUE INDEX) COLUMNS;\par
+ALTER DATABASE ADD SUPPLEMENTAL LOG DATA (ALL) COLUMNS; -- Recommended for comprehensive capture\par
+\par
+-- Enable GoldenGate replication feature\par
+ALTER SYSTEM SET ENABLE_GOLDENGATE_REPLICATION=TRUE SCOPE=BOTH;\par
+\par
+-- Create GoldenGate user (if not already done)\par
+CREATE USER gguser IDENTIFIED BY GgUser123 DEFAULT TABLESPACE users QUOTA UNLIMITED ON users;\par
+GRANT CREATE SESSION, CONNECT, RESOURCE, ALTER SYSTEM TO gguser;\par
+EXEC DBMS_GOLDENGATE_AUTH.GRANT_ADMIN_PRIVILEGE(grantee=>'gguser', privilege_type=>'CAPTURE', grant_optional_privileges=>'*');\par
+EXEC DBMS_GOLDENGATE_AUTH.GRANT_ADMIN_PRIVILEGE(grantee=>'gguser', privilege_type=>'APPLY', grant_optional_privileges=>'*');\par
+1.2. Create APP schema and CUSTOMERS table\par
+\par
+On PROD_DB (Source Table):\par
+\par
+SQL\par
+\par
+-- Connect as SYSDBA or an admin user\par
+CREATE USER app IDENTIFIED BY AppPassword123 DEFAULT TABLESPACE users QUOTA UNLIMITED ON users;\par
+GRANT CREATE SESSION, RESOURCE TO app;\par
+\par
+-- Connect as APP user\par
+CONNECT app/AppPassword123;\par
+\par
+CREATE TABLE customers (\par
+    customer_id    NUMBER(10) PRIMARY KEY,\par
+    first_name     VARCHAR2(50) NOT NULL,\par
+    last_name      VARCHAR2(50) NOT NULL,\par
+    email          VARCHAR2(100) UNIQUE,\par
+    phone_number   VARCHAR2(20),\par
+    address        VARCHAR2(200)\par
+);\par
+\par
+GRANT SELECT, INSERT, UPDATE, DELETE ON customers TO gguser;\par
+\par
+-- Insert some initial data\par
+INSERT INTO customers VALUES (1, 'John', 'Doe', 'john.doe@example.com', '111-222-3333', '123 Main St');\par
+INSERT INTO customers VALUES (2, 'Jane', 'Smith', 'jane.smith@example.com', '444-555-6666', '456 Oak Ave');\par
+COMMIT;\par
+On REGION_DB1 and REGION_DB2 (Target Tables):\par
+The table structure will be identical to the source for this simple example.\par
+\par
+SQL\par
+\par
+-- Connect as SYSDBA or an admin user\par
+CREATE USER app_region IDENTIFIED BY AppRegionPassword123 DEFAULT TABLESPACE users QUOTA UNLIMITED ON users;\par
+GRANT CREATE SESSION, RESOURCE TO app_region;\par
+\par
+-- Connect as APP_REGION user\par
+CONNECT app_region/AppRegionPassword123;\par
+\par
+CREATE TABLE customers (\par
+    customer_id    NUMBER(10) PRIMARY KEY,\par
+    first_name     VARCHAR2(50) NOT NULL,\par
+    last_name      VARCHAR2(50) NOT NULL,\par
+    email          VARCHAR2(100) UNIQUE,\par
+    phone_number   VARCHAR2(20),\par
+    address        VARCHAR2(200)\par
+);\par
+\par
+GRANT SELECT, INSERT, UPDATE, DELETE ON customers TO gguser;\par
+2. GoldenGate Installation & Setup (On all Hosts: HostP, HostR1, HostR2)\par
+2.1. Install GoldenGate binaries.\par
+\par
+2.2. Create Subdirectories (in GGSCI on all hosts)\par
+\par
+GGSCI> CREATE SUBDIRS\par
+2.3. Configure and Start Manager (in GGSCI on all hosts)\par
+\par
+GGSCI> EDIT PARAMS MGR\par
+PORT 7809 # Or your chosen port\par
+\par
+GGSCI> START MGR\par
+GGSCI> INFO MGR\par
+3. GoldenGate Configuration on Source HostP (for PROD_DB)\par
+3.1. DBLOGIN and Checkpoint Table\par
+\par
+GGSCI> DBLOGIN USERID gguser, PASSWORD GgUser123\par
+GGSCI> ADD CHECKPOINTTABLE gguser.chkpt\par
+3.2. Add Supplemental Logging\par
+\par
+GGSCI> ADD TRANDATA app.customers\par
+3.3. Primary Extract (Capturing from PROD_DB)\par
+\par
+Process Name: EXT_PROD\par
+Local Trail: ./dirdat/pd (This is the single source of truth for all data pumps)\par
+GGSCI> EDIT PARAMS EXT_PROD\par
+EXTRACT EXT_PROD\par
+USERID gguser, PASSWORD GgUser123\par
+EXTTRAIL ./dirdat/pd\par
+TABLE app.customers;\par
+\par
+GGSCI> ADD EXTRACT EXT_PROD, INTEGRATED TRANLOG, BEGIN NOW\par
+GGSCI> ADD EXTTRAIL ./dirdat/pd, EXTRACT EXT_PROD\par
+3.4. Data Pump 1 (Sending from PROD_DB to REGION_DB1)\par
+\par
+Process Name: DP_TO_R1\par
+Remote Host: HostR1\par
+Remote Trail: ./dirdat/pr1 (trail file name on HostR1)\par
+GGSCI> EDIT PARAMS DP_TO_R1\par
+EXTRACT DP_TO_R1\par
+USERID gguser, PASSWORD GgUser123\par
+RMTHOST HostR1, MGRPORT 7809\par
+RMTTRAIL ./dirdat/pr1\par
+PASSTHRU\par
+TABLE app.customers;\par
+\par
+GGSCI> ADD EXTRACT DP_TO_R1, EXTTRAILSORUCE ./dirdat/pd\par
+GGSCI> ADD RMTTRAIL ./dirdat/pr1, EXTRACT DP_TO_R1\par
+3.5. Data Pump 2 (Sending from PROD_DB to REGION_DB2)\par
+\par
+Process Name: DP_TO_R2\par
+Remote Host: HostR2\par
+Remote Trail: ./dirdat/pr2 (trail file name on HostR2)\par
+GGSCI> EDIT PARAMS DP_TO_R2\par
+EXTRACT DP_TO_R2\par
+USERID gguser, PASSWORD GgUser123\par
+RMTHOST HostR2, MGRPORT 7809\par
+RMTTRAIL ./dirdat/pr2\par
+PASSTHRU\par
+TABLE app.customers;\par
+\par
+GGSCI> ADD EXTRACT DP_TO_R2, EXTTRAILSORUCE ./dirdat/pd\par
+GGSCI> ADD RMTTRAIL ./dirdat/pr2, EXTRACT DP_TO_R2\par
+4. GoldenGate Configuration on Target HostR1 (for REGION_DB1)\par
+4.1. DBLOGIN and Checkpoint Table\par
+\par
+GGSCI> DBLOGIN USERID gguser, PASSWORD GgUser123\par
+GGSCI> ADD CHECKPOINTTABLE gguser.chkpt\par
+4.2. Replicat Process (REP_PROD_TO_R1)\par
+\par
+Process Name: REP_PROD_TO_R1\par
+Source Remote Trail: ./dirdat/pr1 (from DP_TO_R1 on HostP)\par
+GGSCI> EDIT PARAMS REP_PROD_TO_R1\par
+REPLICAT REP_PROD_TO_R1\par
+USERID gguser, PASSWORD GgUser123\par
+ASSUMETARGETDEFS\par
+CHECKPOINTTABLE gguser.chkpt\par
+DISCARDFILE ./dirdsc/rep_prod_to_r1.dsc, APPEND, MEGABYTES 100\par
+\par
+MAP app.customers, TARGET app_region.customers;\par
+\par
+GGSCI> ADD REPLICAT REP_PROD_TO_R1, INTEGRATED, EXTTRAIL ./dirdat/pr1, CHECKPOINTTABLE gguser.chkpt\par
+5. GoldenGate Configuration on Target HostR2 (for REGION_DB2)\par
+This is similar to HostR1's configuration, but with different process names and trail file designations.\par
+\par
+5.1. DBLOGIN and Checkpoint Table\par
+\par
+GGSCI> DBLOGIN USERID gguser, PASSWORD GgUser123\par
+GGSCI> ADD CHECKPOINTTABLE gguser.chkpt\par
+5.2. Replicat Process (REP_PROD_TO_R2)\par
+\par
+Process Name: REP_PROD_TO_R2\par
+Source Remote Trail: ./dirdat/pr2 (from DP_TO_R2 on HostP)\par
+GGSCI> EDIT PARAMS REP_PROD_TO_R2\par
+REPLICAT REP_PROD_TO_R2\par
+USERID gguser, PASSWORD GgUser123\par
+ASSUMETARGETDEFS\par
+CHECKPOINTTABLE gguser.chkpt\par
+DISCARDFILE ./dirdsc/rep_prod_to_r2.dsc, APPEND, MEGABYTES 100\par
+\par
+MAP app.customers, TARGET app_region.customers;\par
+\par
+GGSCI> ADD REPLICAT REP_PROD_TO_R2, INTEGRATED, EXTTRAIL ./dirdat/pr2, CHECKPOINTTABLE gguser.chkpt\par
+6. Initial Data Synchronization (Crucial!)\par
+Before starting the GoldenGate CDC processes, ensure that the existing data from app.customers on PROD_DB is loaded into app_region.customers on REGION_DB1 and REGION_DB2.\par
+\par
+Method: Initial Load with GoldenGate (Recommended for large datasets)\par
+\par
+Stop all GoldenGate processes on HostP, HostR1, and HostR2.\par
+On HostP (for initial load):\par
+Create a dedicated initial load Extract:\par
+GGSCI> EDIT PARAMS EXT_IL_PROD\par
+EXTRACT EXT_IL_PROD\par
+USERID gguser, PASSWORD GgUser123\par
+EXTTRAIL ./dirdat/ilp\par
+TABLE app.customers;\par
+Add the initial load Extract:\par
+GGSCI> ADD EXTRACT EXT_IL_PROD, SOURCEDB, BEGIN NOW\par
+GGSCI> ADD EXTTRAIL ./dirdat/ilp, EXTRACT EXT_IL_PROD\par
+Start the initial load Extract:\par
+GGSCI> START EXTRACT EXT_IL_PROD\par
+On HostR1 (for initial load):\par
+Create a dedicated initial load Replicat:\par
+GGSCI> EDIT PARAMS REP_IL_R1\par
+REPLICAT REP_IL_R1\par
+USERID gguser, PASSWORD GgUser123\par
+ASSUMETARGETDEFS\par
+DISCARDFILE ./dirdsc/rep_il_r1.dsc, APPEND\par
+HANDLECOLLISIONS # To handle potential primary key conflicts if data already exists\par
+\par
+MAP app.customers, TARGET app_region.customers;\par
+Add the initial load Replicat:\par
+GGSCI> ADD REPLICAT REP_IL_R1, SPECIAL KEEPALIVE, EXTTRAIL ./dirdat/ilp\par
+Start the initial load Replicat:\par
+GGSCI> START REPLICAT REP_IL_R1\par
+Monitor INFO REP_IL_R1 until it stops.\par
+On HostR2 (for initial load):\par
+Repeat step 3, creating REP_IL_R2 for HostR2, also reading from ./dirdat/ilp.\par
+Clean up initial load processes:\par
+GGSCI> STOP EXT_IL_PROD\par
+GGSCI> DELETE EXTRACT EXT_IL_PROD\par
+GGSCI> DELETE EXTTRAIL ./dirdat/ilp\par
+\par
+GGSCI> STOP REP_IL_R1\par
+GGSCI> DELETE REPLICAT REP_IL_R1\par
+\par
+GGSCI> STOP REP_IL_R2\par
+GGSCI> DELETE REPLICAT REP_IL_R2\par
+7. Start and Monitor CDC Processes\par
+On HostP:\par
+\par
+GGSCI> START EXTRACT EXT_PROD\par
+GGSCI> START EXTRACT DP_TO_R1\par
+GGSCI> START EXTRACT DP_TO_R2\par
+GGSCI> INFO ALL\par
+On HostR1:\par
+\par
+GGSCI> START REPLICAT REP_PROD_TO_R1\par
+GGSCI> INFO ALL\par
+On HostR2:\par
+\par
+GGSCI> START REPLICAT REP_PROD_TO_R2\par
+GGSCI> INFO ALL\par
+Monitor:\par
+Regularly check INFO ALL and STATS <process_name> commands in GGSCI. Examine report files (dirrpt) and discard files (dirdsc) on all hosts for any errors or issues.\par
+\par
+8. Testing Broadcast Replication\par
+On PROD_DB (as app user):\par
+\par
+SQL\par
+\par
+INSERT INTO customers VALUES (3, 'Charlie', 'Brown', 'charlie.b@example.com', '777-888-9999', '789 Pine Rd');\par
+COMMIT;\par
+\par
+UPDATE customers SET phone_number = '111-222-0000' WHERE customer_id = 1;\par
+COMMIT;\par
+\par
+DELETE FROM customers WHERE customer_id = 2;\par
+COMMIT;\par
+On REGION_DB1 (as app_region user):\par
+Verify the changes:\par
+\par
+SQL\par
+\par
+SELECT customer_id, first_name, last_name, phone_number FROM customers ORDER BY customer_id;\par
+You should see:\par
+\par
+Customer ID 3 inserted.\par
+Customer ID 1 phone number updated.\par
+Customer ID 2 deleted.\par
+On REGION_DB2 (as app_region user):\par
+Verify the changes (should be identical to REGION_DB1):\par
+\par
+SQL\par
+\par
+SELECT customer_id, first_name, last_name, phone_number FROM customers ORDER BY customer_id;\par
+You should see the exact same changes applied.\par
+}
+ 

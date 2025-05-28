@@ -1,0 +1,348 @@
+{\rtf1\ansi\ansicpg1252\deff0\nouicompat\deflang1033{\fonttbl{\f0\fnil\fcharset0 Calibri;}}
+{\*\generator Riched20 10.0.19041}\viewkind4\uc1 
+\pard\sa200\sl276\slmult1\f0\fs22\lang9 Many-to-One (Consolidation) replication in Oracle GoldenGate is a common topology where data from multiple source databases is replicated and merged into a single target database. This is frequently used for:\par
+\par
+Data Warehousing/Reporting: Consolidating transactional data from various operational systems into a central data warehouse for business intelligence and reporting.\par
+Centralized Analytics: Bringing data from distributed branches or regional databases into a central hub for comprehensive analysis.\par
+Application Integration: Integrating data from different applications that might share common entities into a unified view.\par
+Key Considerations for Many-to-One Consolidation:\par
+Unique Identifiers: Data coming from different sources might have overlapping primary keys. To prevent conflicts and maintain data integrity, you often need to:\par
+Add a Source Identifier Column: Include a new column in the target table (e.g., SOURCE_DB_ID, BRANCH_ID) to uniquely identify the origin of each row.\par
+Concatenated Primary Key: Modify the target table's primary key to include the original primary key from the source plus the new source identifier column.\par
+Data Transformations: Data from different sources might not have identical structures or might require cleansing/standardization before being consolidated. GoldenGate's COLMAP and SQLEXEC functions in the Replicat parameter file are powerful for this.\par
+Conflict Resolution: While less common than in bidirectional, conflicts can still arise if multiple sources try to insert the same logical record into the target, especially if source identifiers aren't used effectively.\par
+Initial Load: Before starting CDC (Change Data Capture), an initial load is required to synchronize the existing data from all source databases to the target.\par
+Example: Consolidating Orders from Multiple Branches\par
+Let's assume we have two branch databases, BRANCH_DB1 (on Host1) and BRANCH_DB2 (on Host2), and we want to consolidate their ORDERS data into a central CENTRAL_DB (on HostC).\par
+\par
+Source Databases: BRANCH_DB1, BRANCH_DB2\par
+Target Database: CENTRAL_DB\par
+\par
+1. Database & Schema Preparation (All Databases)\par
+1.1. SQL (Connect as SYSDBA on BRANCH_DB1, BRANCH_DB2, and CENTRAL_DB)\par
+\par
+SQL\par
+\par
+-- On ALL databases (BRANCH_DB1, BRANCH_DB2, CENTRAL_DB):\par
+\par
+-- Ensure ARCHIVELOG mode and Force Logging\par
+SHUTDOWN IMMEDIATE;\par
+STARTUP MOUNT;\par
+ALTER DATABASE ARCHIVELOG;\par
+ALTER DATABASE OPEN;\par
+ALTER DATABASE FORCE LOGGING;\par
+\par
+-- Enable supplemental logging at the database level\par
+ALTER DATABASE ADD SUPPLEMENTAL LOG DATA;\par
+ALTER DATABASE ADD SUPPLEMENTAL LOG DATA (PRIMARY KEY, UNIQUE INDEX) COLUMNS;\par
+ALTER DATABASE ADD SUPPLEMENTAL LOG DATA (ALL) COLUMNS; -- Recommended for comprehensive capture\par
+\par
+-- Enable GoldenGate replication feature\par
+ALTER SYSTEM SET ENABLE_GOLDENGATE_REPLICATION=TRUE SCOPE=BOTH;\par
+\par
+-- Create GoldenGate user (if not already done)\par
+CREATE USER gguser IDENTIFIED BY GgUser123 DEFAULT TABLESPACE users QUOTA UNLIMITED ON users;\par
+GRANT CREATE SESSION, CONNECT, RESOURCE, ALTER SYSTEM TO gguser;\par
+EXEC DBMS_GOLDENGATE_AUTH.GRANT_ADMIN_PRIVILEGE(grantee=>'gguser', privilege_type=>'CAPTURE', grant_optional_privileges=>'*');\par
+EXEC DBMS_GOLDENGATE_AUTH.GRANT_ADMIN_PRIVILEGE(grantee=>'gguser', privilege_type=>'APPLY', grant_optional_privileges=>'*');\par
+1.2. Create SALES schema and ORDERS table\par
+\par
+On BRANCH_DB1 and BRANCH_DB2 (Source Tables):\par
+\par
+SQL\par
+\par
+-- Connect as SYSDBA or an admin user\par
+CREATE USER sales IDENTIFIED BY SalesPassword123 DEFAULT TABLESPACE users QUOTA UNLIMITED ON users;\par
+GRANT CREATE SESSION, RESOURCE TO sales;\par
+\par
+-- Connect as SALES user\par
+CONNECT sales/SalesPassword123;\par
+\par
+CREATE TABLE orders (\par
+    order_id       NUMBER(10) PRIMARY KEY,\par
+    customer_name  VARCHAR2(100),\par
+    order_date     DATE,\par
+    total_amount   NUMBER(10,2),\par
+    status         VARCHAR2(20)\par
+);\par
+\par
+GRANT SELECT, INSERT, UPDATE, DELETE ON orders TO gguser;\par
+\par
+-- Insert some initial data (different sets for each branch)\par
+-- On BRANCH_DB1:\par
+INSERT INTO orders VALUES (1001, 'Alice Smith', SYSDATE, 150.00, 'PENDING');\par
+INSERT INTO orders VALUES (1002, 'Bob Johnson', SYSDATE, 230.50, 'SHIPPED');\par
+COMMIT;\par
+\par
+-- On BRANCH_DB2:\par
+INSERT INTO orders VALUES (2001, 'Charlie Brown', SYSDATE, 99.99, 'PENDING');\par
+INSERT INTO orders VALUES (2002, 'Diana Prince', SYSDATE, 450.00, 'COMPLETED');\par
+COMMIT;\par
+On CENTRAL_DB (Target Table - with SOURCE_ID):\par
+\par
+SQL\par
+\par
+-- Connect as SYSDBA or an admin user\par
+CREATE USER sales_central IDENTIFIED BY SalesCentralPassword123 DEFAULT TABLESPACE users QUOTA UNLIMITED ON users;\par
+GRANT CREATE SESSION, RESOURCE TO sales_central;\par
+\par
+-- Connect as SALES_CENTRAL user\par
+CONNECT sales_central/SalesCentralPassword123;\par
+\par
+CREATE TABLE consolidated_orders (\par
+    source_id      VARCHAR2(10) NOT NULL, -- To identify the source branch\par
+    order_id       NUMBER(10) NOT NULL,\par
+    customer_name  VARCHAR2(100),\par
+    order_date     DATE,\par
+    total_amount   NUMBER(10,2),\par
+    status         VARCHAR2(20),\par
+    CONSTRAINT pk_consolidated_orders PRIMARY KEY (source_id, order_id) -- Composite PK\par
+);\par
+\par
+GRANT SELECT, INSERT, UPDATE, DELETE ON consolidated_orders TO gguser;\par
+2. GoldenGate Installation & Setup (On all Hosts: Host1, Host2, HostC)\par
+2.1. Install GoldenGate binaries.\par
+\par
+2.2. Create Subdirectories (in GGSCI on all hosts)\par
+\par
+GGSCI> CREATE SUBDIRS\par
+2.3. Configure and Start Manager (in GGSCI on all hosts)\par
+\par
+GGSCI> EDIT PARAMS MGR\par
+PORT 7809 # Or your chosen port\par
+\par
+GGSCI> START MGR\par
+GGSCI> INFO MGR\par
+3. GoldenGate Configuration on Source Host1 (for BRANCH_DB1)\par
+3.1. DBLOGIN and Checkpoint Table\par
+\par
+GGSCI> DBLOGIN USERID gguser, PASSWORD GgUser123\par
+GGSCI> ADD CHECKPOINTTABLE gguser.chkpt\par
+3.2. Add Supplemental Logging\par
+\par
+GGSCI> ADD TRANDATA sales.orders\par
+3.3. Primary Extract (Capturing from BRANCH_DB1)\par
+\par
+Process Name: EXT_BR1\par
+Local Trail: ./dirdat/br1\par
+GGSCI> EDIT PARAMS EXT_BR1\par
+EXTRACT EXT_BR1\par
+USERID gguser, PASSWORD GgUser123\par
+EXTTRAIL ./dirdat/br1\par
+TABLE sales.orders;\par
+\par
+GGSCI> ADD EXTRACT EXT_BR1, INTEGRATED TRANLOG, BEGIN NOW\par
+GGSCI> ADD EXTTRAIL ./dirdat/br1, EXTRACT EXT_BR1\par
+3.4. Data Pump (Sending from BRANCH_DB1 to CENTRAL_DB)\par
+\par
+Process Name: DP_BR1\par
+Remote Host: HostC (IP address or hostname of CENTRAL_DB server)\par
+Remote Trail: ./dirdat/c1 (trail file name on HostC for changes from BRANCH_DB1)\par
+GGSCI> EDIT PARAMS DP_BR1\par
+EXTRACT DP_BR1\par
+USERID gguser, PASSWORD GgUser123\par
+RMTHOST HostC, MGRPORT 7809\par
+RMTTRAIL ./dirdat/c1\par
+PASSTHRU\par
+TABLE sales.orders;\par
+\par
+GGSCI> ADD EXTRACT DP_BR1, EXTTRAILSORUCE ./dirdat/br1\par
+GGSCI> ADD RMTTRAIL ./dirdat/c1, EXTRACT DP_BR1\par
+4. GoldenGate Configuration on Source Host2 (for BRANCH_DB2)\par
+This is similar to Host1's configuration, but with different process names and trail file designations.\par
+\par
+4.1. DBLOGIN and Checkpoint Table\par
+\par
+GGSCI> DBLOGIN USERID gguser, PASSWORD GgUser123\par
+GGSCI> ADD CHECKPOINTTABLE gguser.chkpt\par
+4.2. Add Supplemental Logging\par
+\par
+GGSCI> ADD TRANDATA sales.orders\par
+4.3. Primary Extract (Capturing from BRANCH_DB2)\par
+\par
+Process Name: EXT_BR2\par
+Local Trail: ./dirdat/br2\par
+GGSCI> EDIT PARAMS EXT_BR2\par
+EXTRACT EXT_BR2\par
+USERID gguser, PASSWORD GgUser123\par
+EXTTRAIL ./dirdat/br2\par
+TABLE sales.orders;\par
+\par
+GGSCI> ADD EXTRACT EXT_BR2, INTEGRATED TRANLOG, BEGIN NOW\par
+GGSCI> ADD EXTTRAIL ./dirdat/br2, EXTRACT EXT_BR2\par
+4.4. Data Pump (Sending from BRANCH_DB2 to CENTRAL_DB)\par
+\par
+Process Name: DP_BR2\par
+Remote Host: HostC\par
+Remote Trail: ./dirdat/c2 (trail file name on HostC for changes from BRANCH_DB2)\par
+GGSCI> EDIT PARAMS DP_BR2\par
+EXTRACT DP_BR2\par
+USERID gguser, PASSWORD GgUser123\par
+RMTHOST HostC, MGRPORT 7809\par
+RMTTRAIL ./dirdat/c2\par
+PASSTHRU\par
+TABLE sales.orders;\par
+\par
+GGSCI> ADD EXTRACT DP_BR2, EXTTRAILSORUCE ./dirdat/br2\par
+GGSCI> ADD RMTTRAIL ./dirdat/c2, EXTRACT DP_BR2\par
+5. GoldenGate Configuration on Target HostC (for CENTRAL_DB)\par
+5.1. DBLOGIN and Checkpoint Table\par
+\par
+GGSCI> DBLOGIN USERID gguser, PASSWORD GgUser123\par
+GGSCI> ADD CHECKPOINTTABLE gguser.chkpt\par
+5.2. Replicat Process for BRANCH_DB1 data (REP_BR1_TO_CEN)\par
+\par
+Process Name: REP_BR1_TO_CEN\par
+Source Remote Trail: ./dirdat/c1 (from DP_BR1 on Host1)\par
+Transformation: COLMAP is used to map source columns to target columns and crucially, to populate the SOURCE_ID column with a static value 'BRANCH1'.\par
+GGSCI> EDIT PARAMS REP_BR1_TO_CEN\par
+REPLICAT REP_BR1_TO_CEN\par
+USERID gguser, PASSWORD GgUser123\par
+ASSUMETARGETDEFS\par
+CHECKPOINTTABLE gguser.chkpt\par
+DISCARDFILE ./dirdsc/rep_br1_to_cen.dsc, APPEND, MEGABYTES 100\par
+\par
+-- Map source table to target table, adding the source_id\par
+MAP sales.orders, TARGET sales_central.consolidated_orders,\par
+COLMAP (\par
+    SOURCE_ID = 'BRANCH1',\par
+    ORDER_ID = ORDER_ID,\par
+    CUSTOMER_NAME = CUSTOMER_NAME,\par
+    ORDER_DATE = ORDER_DATE,\par
+    TOTAL_AMOUNT = TOTAL_AMOUNT,\par
+    STATUS = STATUS\par
+);\par
+\par
+GGSCI> ADD REPLICAT REP_BR1_TO_CEN, INTEGRATED, EXTTRAIL ./dirdat/c1, CHECKPOINTTABLE gguser.chkpt\par
+5.3. Replicat Process for BRANCH_DB2 data (REP_BR2_TO_CEN)\par
+\par
+Process Name: REP_BR2_TO_CEN\par
+Source Remote Trail: ./dirdat/c2 (from DP_BR2 on Host2)\par
+Transformation: COLMAP populates SOURCE_ID with 'BRANCH2'.\par
+GGSCI> EDIT PARAMS REP_BR2_TO_CEN\par
+REPLICAT REP_BR2_TO_CEN\par
+USERID gguser, PASSWORD GgUser123\par
+ASSUMETARGETDEFS\par
+CHECKPOINTTABLE gguser.chkpt\par
+DISCARDFILE ./dirdsc/rep_br2_to_cen.dsc, APPEND, MEGABYTES 100\par
+\par
+-- Map source table to target table, adding the source_id\par
+MAP sales.orders, TARGET sales_central.consolidated_orders,\par
+COLMAP (\par
+    SOURCE_ID = 'BRANCH2',\par
+    ORDER_ID = ORDER_ID,\par
+    CUSTOMER_NAME = CUSTOMER_NAME,\par
+    ORDER_DATE = ORDER_DATE,\par
+    TOTAL_AMOUNT = TOTAL_AMOUNT,\par
+    STATUS = STATUS\par
+);\par
+\par
+GGSCI> ADD REPLICAT REP_BR2_TO_CEN, INTEGRATED, EXTTRAIL ./dirdat/c2, CHECKPOINTTABLE gguser.chkpt\par
+6. Initial Data Synchronization (Crucial!)\par
+Before starting the GoldenGate CDC processes, ensure that the existing data from sales.orders on BRANCH_DB1 and BRANCH_DB2 is loaded into sales_central.consolidated_orders on CENTRAL_DB.\par
+\par
+Method: Initial Load with GoldenGate (Recommended for large datasets)\par
+\par
+Stop all GoldenGate processes on Host1, Host2, and HostC.\par
+On Host1 (for BRANCH_DB1 initial load):\par
+Create a dedicated initial load Extract:\par
+GGSCI> EDIT PARAMS EXT_IL_BR1\par
+EXTRACT EXT_IL_BR1\par
+USERID gguser, PASSWORD GgUser123\par
+EXTTRAIL ./dirdat/il1\par
+TABLE sales.orders;\par
+Add the initial load Extract:\par
+GGSCI> ADD EXTRACT EXT_IL_BR1, SOURCEDB, BEGIN NOW\par
+GGSCI> ADD EXTTRAIL ./dirdat/il1, EXTRACT EXT_IL_BR1\par
+Start the initial load Extract:\par
+GGSCI> START EXTRACT EXT_IL_BR1\par
+On HostC (for BRANCH_DB1 initial load):\par
+Create a dedicated initial load Replicat:\par
+GGSCI> EDIT PARAMS REP_IL_BR1\par
+REPLICAT REP_IL_BR1\par
+USERID gguser, PASSWORD GgUser123\par
+ASSUMETARGETDEFS\par
+-- Crucial for initial load:\par
+DISCARDFILE ./dirdsc/rep_il_br1.dsc, APPEND\par
+HANDLECOLLISIONS\par
+\par
+MAP sales.orders, TARGET sales_central.consolidated_orders,\par
+COLMAP (\par
+    SOURCE_ID = 'BRANCH1',\par
+    ORDER_ID = ORDER_ID,\par
+    CUSTOMER_NAME = CUSTOMER_NAME,\par
+    ORDER_DATE = ORDER_DATE,\par
+    TOTAL_AMOUNT = TOTAL_AMOUNT,\par
+    STATUS = STATUS\par
+);\par
+Add the initial load Replicat:\par
+GGSCI> ADD REPLICAT REP_IL_BR1, SPECIAL KEEPALIVE, EXTTRAIL ./dirdat/il1\par
+Start the initial load Replicat:\par
+GGSCI> START REPLICAT REP_IL_BR1\par
+Monitor INFO REP_IL_BR1 until it stops (initial load replicats run once and stop).\par
+Repeat steps 2 and 3 for BRANCH_DB2:\par
+Create EXT_IL_BR2 and DP_IL_BR2 on Host2 pointing to ./dirdat/il2 on HostC.\par
+Create REP_IL_BR2 on HostC using ./dirdat/il2 and mapping SOURCE_ID = 'BRANCH2'.\par
+Clean up initial load processes:\par
+GGSCI> STOP EXT_IL_BR1\par
+GGSCI> DELETE EXTRACT EXT_IL_BR1\par
+GGSCI> DELETE EXTTRAIL ./dirdat/il1\par
+\par
+GGSCI> STOP REP_IL_BR1\par
+GGSCI> DELETE REPLICAT REP_IL_BR1\par
+(and similarly for _IL_BR2 processes)\par
+7. Start and Monitor CDC Processes\par
+On Host1:\par
+\par
+GGSCI> START EXTRACT EXT_BR1\par
+GGSCI> START EXTRACT DP_BR1\par
+GGSCI> INFO ALL\par
+On Host2:\par
+\par
+GGSCI> START EXTRACT EXT_BR2\par
+GGSCI> START EXTRACT DP_BR2\par
+GGSCI> INFO ALL\par
+On HostC:\par
+\par
+GGSCI> START REPLICAT REP_BR1_TO_CEN\par
+GGSCI> START REPLICAT REP_BR2_TO_CEN\par
+GGSCI> INFO ALL\par
+Monitor:\par
+Regularly check INFO ALL and STATS <process_name> commands in GGSCI. Examine report files (dirrpt) and discard files (dirdsc) for any errors or issues.\par
+\par
+8. Testing Consolidation\par
+On BRANCH_DB1 (as sales user):\par
+\par
+SQL\par
+\par
+INSERT INTO orders VALUES (1003, 'Frank White', SYSDATE, 300.00, 'PROCESSING');\par
+COMMIT;\par
+UPDATE orders SET status = 'COMPLETED' WHERE order_id = 1001;\par
+COMMIT;\par
+On BRANCH_DB2 (as sales user):\par
+\par
+SQL\par
+\par
+INSERT INTO orders VALUES (2003, 'Grace Hopper', SYSDATE, 75.25, 'NEW');\par
+COMMIT;\par
+UPDATE orders SET total_amount = 250.00 WHERE order_id = 2001;\par
+COMMIT;\par
+On CENTRAL_DB (as sales_central user):\par
+Verify the consolidated data:\par
+\par
+SQL\par
+\par
+SELECT source_id, order_id, customer_name, total_amount, status FROM consolidated_orders ORDER BY source_id, order_id;\par
+You should see all the records from both branches, clearly identified by their SOURCE_ID.\par
+\par
+SOURCE_ID  ORDER_ID CUSTOMER_NAME    TOTAL_AMOUNT STATUS\par
+---------- -------- ---------------- ------------ ----------\par
+BRANCH1        1001 Alice Smith          150.00 COMPLETED\par
+BRANCH1        1002 Bob Johnson          230.50 SHIPPED\par
+BRANCH1        1003 Frank White          300.00 PROCESSING\par
+BRANCH2        2001 Charlie Brown        250.00 PENDING\par
+BRANCH2        2002 Diana Prince         450.00 COMPLETED\par
+BRANCH2        2003 Grace Hopper          75.25 NEW\par
+This example demonstrates the core principles of Many-to-One consolidation, particularly the use of a source identifier column and COLMAP for transformations on the Replicat side.\par
+}
+ 
